@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Face Tracking</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+
+<style>
+body{margin:0;background:#0f172a;font-family:system-ui,sans-serif}
+h1{margin:0px;text-align:center; color:#38bdf8}
+h2{margin:0px;text-align:center;color:white;font-size:16px;font-weight:normal}
+#main{display:flex;justify-content:center;gap:20px;padding:8px}
+#camWrap{position:relative}
+#video{width:640px;transform:scaleX(-1);border-radius:12px}
+#overlay{position:absolute;left:0;top:0}
+#panel{background:#fff;border-radius:10px;padding:5px;width:260px}
+.sliderRow{font-size:13px;margin-bottom:6px}
+.sliderRow label{display:flex;justify-content:space-between}
+.sliderRow input{width:100%}
+button{width:100%;padding:10px;margin-bottom:8px;font-size:15px;border-radius:10px;border:none;cursor:pointer;color:#0f172a;background:#38bdf8}
+#status{text-align:center;font-weight:bold;margin-bottom:8px}
+</style>
+</head>
+
+<body>
+<h1>Face Tracking</h1>
+<h2>OŠ "Matija Gubec" Tavankut</h2>
+<div id="main">
+  <div id="camWrap">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <div id="panel">
+    <button id="btnBT">Connect micro:bit</button>
+    <div id="status">Disconnected</div>
+    <div id="sliders"></div>
+  </div>
+</div>
+
+<script>
+/* ---------------- BLE Setup ---------------- */
+const UART_SERVICE="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const UART_TX="6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+let uartChar=null;
+const status=document.getElementById("status");
+const btnBT=document.getElementById("btnBT");
+
+btnBT.onclick=async()=>{
+  try{
+    const device = await navigator.bluetooth.requestDevice({
+      filters:[{namePrefix:"BBC micro:bit"}],
+      optionalServices:[UART_SERVICE]
+    });
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(UART_SERVICE);
+    uartChar = await service.getCharacteristic(UART_TX);
+    status.textContent="Connected ✅";
+  }catch(e){
+    console.error(e);
+    status.textContent="Failed ❌";
+  }
+};
+
+/* ---------------- Helpers ---------------- */
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const map=(v,a,b,c,d)=>c+(v-a)*(d-c)/(b-a);
+const pad2=v=>Math.round(v).toString().padStart(2,"0");
+
+/* ---------------- Sliders ---------------- */
+const sliderDefs=[["X",99],["Y",99],["Distance (Z)",99],["Yaw",99],["Pitch",99],
+                  ["Mouth",99],["Left eye",99],["Right eye",99],
+                  ["Roll",9],["Smile",9],["Face visible",1]];
+
+const sliders=document.getElementById("sliders");
+const sliderEls={};
+sliders.innerHTML=sliderDefs.map(([n,max],i)=>`
+<div class="sliderRow">
+<label>${n}<span id="v${i}">0</span></label>
+<input type="range" min="0" max="${max}" value="0" disabled>
+</div>`).join("");
+[...sliders.querySelectorAll("input")].forEach((s,i)=>sliderEls[i]=s);
+
+/* ---------------- FaceMesh ---------------- */
+const video=document.getElementById("video");
+const canvas=document.getElementById("overlay");
+const ctx=canvas.getContext("2d");
+const faceMesh=new FaceMesh({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`});
+faceMesh.setOptions({maxNumFaces:1,refineLandmarks:true});
+
+let lastPacket="0000000000000000000";
+
+/* ---------------- Camera ---------------- */
+new Camera(video,{onFrame:()=>faceMesh.send({image:video}),width:640,height:480}).start();
+
+/* ---------------- Predict & Draw ---------------- */
+faceMesh.onResults(res=>{
+  canvas.width=video.videoWidth;
+  canvas.height=video.videoHeight;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.save();
+  ctx.scale(-1,1);
+  ctx.translate(-canvas.width,0); // mirror
+
+  let X=0,Y=0,Z=0,Yaw=0,Pitch=0,M=0,LE=0,RE=0,R=0,S=0,V=0;
+  if(res.multiFaceLandmarks?.length){
+    V=1;
+    const lm=res.multiFaceLandmarks[0];
+    ctx.fillStyle="#00aaff";
+    lm.forEach(p=>{ctx.beginPath();ctx.arc(p.x*canvas.width,p.y*canvas.height,1.2,0,Math.PI*2);ctx.fill()});
+
+    const nose=lm[1];
+    X=map(nose.x,0,1,0,99);
+    Y=map(nose.y,0,1,0,99);
+    Z=map(nose.z,-0.1,0.1,0,99);
+
+    const left=lm[33], right=lm[263];
+    Yaw=map(right.x-left.x,0.08,0.18,0,99);
+    Pitch=map(lm[10].y-nose.y,-0.074,-0.154,0,99);
+
+    M=map(Math.abs(lm[13].y-lm[14].y),0,0.06,0,99);
+    LE=map(Math.abs(lm[159].y-lm[145].y),0.005,0.02,0,99);
+    RE=map(Math.abs(lm[386].y-lm[374].y),0.005,0.02,0,99);
+
+    R=map(Math.atan2(right.y-left.y,right.x-left.x),-0.5,0.5,0,9);
+    S=map(lm[61].x-lm[291].x,-0.065,-0.090,0,9);
+  }
+  ctx.restore();
+
+  [X,Y,Z,Yaw,Pitch,M,LE,RE]=[X,Y,Z,Yaw,Pitch,M,LE,RE].map(v=>clamp(v,0,99));
+  R=clamp(R,0,9); S=clamp(S,0,9);
+
+  const values=[X,Y,Z,Yaw,Pitch,M,LE,RE,R,S,V];
+  values.forEach((v,i)=>{sliderEls[i].value=Math.round(v);document.getElementById("v"+i).textContent=Math.round(v)});
+  lastPacket=pad2(X)+pad2(Y)+pad2(Z)+pad2(Yaw)+pad2(Pitch)+pad2(M)+pad2(LE)+pad2(RE)+Math.round(R)+Math.round(S)+V;
+});
+
+/* ---------------- BLE write queue ---------------- */
+let bleQueue = Promise.resolve();
+let writeCount = 0;
+async function sendUARTPacket(packet){
+  if(!uartChar) return;
+  bleQueue = bleQueue.then(async ()=>{
+    try{
+      const payload = new TextEncoder().encode(packet+"\n");
+      writeCount++;
+      console.log('Write #' + writeCount + ':', packet, 'Size:', payload.length);
+      await uartChar.writeValueWithoutResponse(payload);
+      console.log('✓ Success');
+    }catch(e){
+      console.error('✗ Failed:', e.message);
+    }
+  });
+  await bleQueue;
+}
+
+/* ---------------- Send every 500ms (slower) ---------------- */
+setInterval(()=>sendUARTPacket(lastPacket),500);
+</script>
+</body>
+</html>
